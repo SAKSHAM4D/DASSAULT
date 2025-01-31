@@ -1,109 +1,138 @@
+import requests
 import sounddevice as sd
-import numpy as np
-import whisper
-import threading
-import queue
+import wave
+import array
 import time
-
-
 import board
-import digitalio
+import busio
 import adafruit_ssd1306
-from PIL import Image, ImageDraw, ImageFont
 
+# Configuration for the OLED display
+WIDTH = 128
+HEIGHT = 64
+i2c = busio.I2C(board.SCL, board.SDA)
+oled = adafruit_ssd1306.SSD1306_I2C(WIDTH, HEIGHT, i2c)
 
-i2c = board.I2C()
-oled_width = 128
-oled_height = 64
-oled = adafruit_ssd1306.SSD1306_I2C(oled_width, oled_height, i2c)
-
-
+# Clear OLED display at the start
 oled.fill(0)
 oled.show()
 
+# API URL of the Whisper transcription server
+API_URL = 'http://192.168.1.15:5000/transcribe'  # Replace <server-ip> with the IP of your Flask API server
 
-try:
-    font = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 10)
-except:
-    font = ImageFont.load_default()
+# Audio recording configuration
+DURATION = 5  # Record audio for 5 seconds
+SAMPLERATE = 16000  # Whisper requires 16000 Hz audio
 
 
-image = Image.new('1', (oled_width, oled_height))
-draw = ImageDraw.Draw(image)
-draw.text((0, 0), "Loading Whisper...", font=font, fill=255)
-oled.image(image)
-oled.show()
+def display_text_on_oled(text):
+    """
+    Display a given message on the OLED screen.
+    It will automatically scroll if the text is too long.
+    """
+    from adafruit_framebuf import FrameBuffer, MONO_VLSB
+    import adafruit_framebuf
 
-print("Loading Whisper model...")
-model = whisper.load_model("tiny")
+    oled.fill(0)  # Clear display
+    buffer = bytearray((WIDTH * HEIGHT) // 8)
+    fb = FrameBuffer(buffer, WIDTH, HEIGHT, MONO_VLSB)
 
-SAMPLERATE = 16000
-BUFFER_DURATION = 5 
-audio_queue = queue.Queue() 
+    # Break text into multiple lines if it's too long
+    lines = []
+    max_chars_per_line = WIDTH // 6  # Assume each char is about 6 pixels wide
 
-def audio_callback(indata, frames, time, status):
-    """Handles incoming audio and puts it into the queue."""
-    if status:
-        print(f"Status: {status}")
-    audio_queue.put(indata[:, 0]) 
+    while len(text) > 0:
+        line = text[:max_chars_per_line]
+        text = text[max_chars_per_line:]
+        lines.append(line)
 
-def display_on_oled(text):
-    """Display the transcription on the OLED display."""
-    oled.fill(0)  # Clear the screen
-    image = Image.new('1', (oled_width, oled_height))
-    draw = ImageDraw.Draw(image)
-    
-    
-    max_chars_per_line = 20 
-    lines = [text[i:i + max_chars_per_line] for i in range(0, len(text), max_chars_per_line)]
-    
-    
-    for i, line in enumerate(lines[:6]):
-        draw.text((0, i * 10), line, font=font, fill=255)
-    
-    oled.image(image)
+    # Display each line, scrolling if too many
+    for i, line in enumerate(lines[: (HEIGHT // 8)]):  # 8-pixel tall font
+        fb.text(line, 0, i * 8, 1)
+
+    oled.fill(0)  # Clear OLED display
+    oled.image(fb)
     oled.show()
 
-def transcribe_audio():
-    """Continuously reads from the audio queue and transcribes the audio."""
-    print("Transcription started...")
-    audio_data = np.array([], dtype=np.float32) 
-    while True:
-        try:
-            
-            new_audio = audio_queue.get(timeout=1)
-            audio_data = np.concatenate((audio_data, new_audio.astype(np.float32))) 
-            
-            
-            if len(audio_data) >= BUFFER_DURATION * SAMPLERATE:
-                print("Transcribing the latest data")
-                result = model.transcribe(audio_data.astype(np.float32), fp16=False, task="transcribe")
-                transcription = result['text']
+
+def save_audio_to_wav(filename, samplerate, audio_data):
+    """
+    Save the audio data to a WAV file using the wave module.
+    """
+    with wave.open(filename, 'w') as wf:
+        wf.setnchannels(1)  # Mono audio
+        wf.setsampwidth(2)  # 2 bytes per sample (16-bit audio)
+        wf.setframerate(samplerate)
+        wf.writeframes(array.array('h', audio_data.flatten()))
+
+
+def record_audio(filename='recorded_audio.wav'):
+    """
+    Record audio from the default microphone and save it as a WAV file.
+    """
+    print(f"Recording {DURATION} seconds of audio...")
+    display_text_on_oled("Recording audio...")
+
+    try:
+        # Record audio as an array
+        audio_data = sd.rec(int(DURATION * SAMPLERATE), samplerate=SAMPLERATE, channels=1, dtype='int16')
+        sd.wait()  # Wait until the recording is complete
+
+        # Save the audio data to a WAV file
+        save_audio_to_wav(filename, SAMPLERATE, audio_data)
+        print(f"Audio saved to {filename}")
+        display_text_on_oled("Audio saved.")
+    except Exception as e:
+        print(f"Error while recording audio: {e}")
+        display_text_on_oled("Recording failed.")
+
+
+def send_audio_to_api(filename='recorded_audio.wav'):
+    """
+    Send the recorded audio to the API for transcription.
+    """
+    try:
+        with open(filename, 'rb') as audio_file:
+            print(f"Sending {filename} to API for transcription...")
+            display_text_on_oled("Sending audio...")
+
+            response = requests.post(API_URL, files={'audio': audio_file})
+
+            if response.status_code == 200:
+                transcription = response.json().get('transcription', 'No transcription found.')
                 print(f"Transcription: {transcription}")
-                
-                
-                display_on_oled(transcription)
-                
-                
-                audio_data = np.array([], dtype=np.float32)
-        except queue.Empty:
-            pass
+                display_text_on_oled(transcription[:128])  # Limit to 128 characters for OLED
+            else:
+                print(f"Error: {response.json()}")
+                display_text_on_oled("Transcription failed.")
+    except Exception as e:
+        print(f"Error while sending audio: {e}")
+        display_text_on_oled("Error sending audio.")
+
 
 def main():
-    """Starts the audio stream and transcription threads."""
-    stream = sd.InputStream(samplerate=SAMPLERATE, channels=1, callback=audio_callback)
-    transcription_thread = threading.Thread(target=transcribe_audio, daemon=True)
-    transcription_thread.start()
-    
-    print("Listening for live transcription...")
-    with stream:
+    """
+    Main function that records audio, sends it to the API, and displays the transcription.
+    """
+    while True:
         try:
-            while True:
-                time.sleep(0.05)
+            display_text_on_oled("Press Ctrl+C to exit")
+            time.sleep(2)
+
+            display_text_on_oled("Recording in 3...")
+            time.sleep(1)
+            display_text_on_oled("Recording in 2...")
+            time.sleep(1)
+            display_text_on_oled("Recording in 1...")
+            time.sleep(1)
+
+            record_audio()  # Record audio from microphone
+            send_audio_to_api()  # Send the audio to the API and display transcription
         except KeyboardInterrupt:
-            print("\nThe code is now being exited \nBYE")
-            oled.fill(0)
-            oled.show()
+            print("Exiting...")
+            display_text_on_oled("Goodbye!")
+            break
+
 
 if __name__ == "__main__":
     main()
