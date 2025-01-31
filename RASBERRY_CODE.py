@@ -30,9 +30,10 @@ def display_text_on_oled(text):
     Display a given message on the OLED screen.
     It will automatically scroll if the text is too long.
     """
+    
     from adafruit_framebuf import FrameBuffer, MONO_VLSB
     import adafruit_framebuf
-
+    print(text)
     oled.fill(0)  # Clear display
     buffer = bytearray((WIDTH * HEIGHT) // 8)
     fb = FrameBuffer(buffer, WIDTH, HEIGHT, MONO_VLSB)
