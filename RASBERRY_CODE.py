@@ -1,7 +1,5 @@
 import requests
-import sounddevice as sd
-import wave
-import array
+import os
 import time
 import board
 import busio
@@ -18,11 +16,11 @@ oled.fill(0)
 oled.show()
 
 # API URL of the Whisper transcription server
-API_URL = 'http://192.168.1.15:5000/transcribe'  # Replace <server-ip> with the IP of your Flask API server
+API_URL = 'http://192.168.1.15:5000/transcribe'  # Replace with your Flask API server IP
 
 # Audio recording configuration
 DURATION = 5  # Record audio for 5 seconds
-SAMPLERATE = 16000  # Whisper requires 16000 Hz audio
+FILENAME = "recorded_audio.wav"
 
 
 def display_text_on_oled(text):
@@ -30,9 +28,7 @@ def display_text_on_oled(text):
     Display a given message on the OLED screen.
     It will automatically scroll if the text is too long.
     """
-    
     from adafruit_framebuf import FrameBuffer, MONO_VLSB
-    import adafruit_framebuf
     print(text)
     oled.fill(0)  # Clear display
     buffer = bytearray((WIDTH * HEIGHT) // 8)
@@ -56,45 +52,30 @@ def display_text_on_oled(text):
     oled.show()
 
 
-def save_audio_to_wav(filename, samplerate, audio_data):
+def record_audio():
     """
-    Save the audio data to a WAV file using the wave module.
-    """
-    with wave.open(filename, 'w') as wf:
-        wf.setnchannels(1)  # Mono audio
-        wf.setsampwidth(2)  # 2 bytes per sample (16-bit audio)
-        wf.setframerate(samplerate)
-        wf.writeframes(array.array('h', audio_data.flatten()))
-
-
-def record_audio(filename='recorded_audio.wav'):
-    """
-    Record audio from the default microphone and save it as a WAV file.
+    Record audio using arecord command.
     """
     print(f"Recording {DURATION} seconds of audio...")
     display_text_on_oled("Recording audio...")
 
     try:
-        # Record audio as an array
-        audio_data = sd.rec(int(DURATION * SAMPLERATE), samplerate=SAMPLERATE, channels=1, dtype='int16')
-        sd.wait()  # Wait until the recording is complete
-
-        # Save the audio data to a WAV file
-        save_audio_to_wav(filename, SAMPLERATE, audio_data)
-        print(f"Audio saved to {filename}")
+        command = f"arecord -D plughw:1,0 -f S16_LE -c1 -r 16000 -t wav -d {DURATION} {FILENAME}"
+        os.system(command)
+        print(f"Audio saved to {FILENAME}")
         display_text_on_oled("Audio saved.")
     except Exception as e:
         print(f"Error while recording audio: {e}")
         display_text_on_oled("Recording failed.")
 
 
-def send_audio_to_api(filename='recorded_audio.wav'):
+def send_audio_to_api():
     """
     Send the recorded audio to the API for transcription.
     """
     try:
-        with open(filename, 'rb') as audio_file:
-            print(f"Sending {filename} to API for transcription...")
+        with open(FILENAME, 'rb') as audio_file:
+            print(f"Sending {FILENAME} to API for transcription...")
             display_text_on_oled("Sending audio...")
 
             response = requests.post(API_URL, files={'audio': audio_file})
@@ -115,19 +96,20 @@ def main():
     """
     Main function that records audio, sends it to the API, and displays the transcription.
     """
+
+    
+    display_text_on_oled("Press Ctrl+C to exit")
+    time.sleep(2)
+
+    display_text_on_oled("Recording in 3...")
+    time.sleep(1)
+    display_text_on_oled("Recording in 2...")
+    time.sleep(1)
+    display_text_on_oled("Recording in 1...")
+    time.sleep(1)
     while True:
         try:
-            display_text_on_oled("Press Ctrl+C to exit")
-            time.sleep(2)
-
-            display_text_on_oled("Recording in 3...")
-            time.sleep(1)
-            display_text_on_oled("Recording in 2...")
-            time.sleep(1)
-            display_text_on_oled("Recording in 1...")
-            time.sleep(1)
-
-            record_audio()  # Record audio from microphone
+            record_audio()  # Record audio using arecord
             send_audio_to_api()  # Send the audio to the API and display transcription
         except KeyboardInterrupt:
             print("Exiting...")
